@@ -32,7 +32,10 @@ export function ParameterWorkbench() {
   const derived = useMemo(() => {
     const susceptible = Math.max(
       0,
-      appliedParams.population - appliedParams.initialInfected - appliedParams.initialRecovered,
+      appliedParams.population -
+        appliedParams.initialInfected -
+        appliedParams.initialRecovered -
+        appliedParams.initialDeceased,
     );
     const totalInterventionCost =
       appliedParams.costs.noIntervention +
@@ -76,6 +79,10 @@ export function ParameterWorkbench() {
               <p className="text-base font-semibold">{appliedParams.initialRecovered}</p>
             </div>
             <div className="rounded-xl border border-app-panel-border bg-app px-3 py-2">
+              <p className="text-app-muted">Deceased</p>
+              <p className="text-base font-semibold">{appliedParams.initialDeceased}</p>
+            </div>
+            <div className="rounded-xl border border-app-panel-border bg-app px-3 py-2">
               <p className="text-app-muted">Budget</p>
               <p className="text-base font-semibold">{appliedParams.budget.toFixed(0)}</p>
             </div>
@@ -92,7 +99,7 @@ export function ParameterWorkbench() {
         </aside>
       </div>
 
-      <EpidemicVisualization params={appliedParams} resetSignal={resetSignal} />
+      <EpidemicVisualization key={resetSignal} params={appliedParams} />
     </section>
   );
 }

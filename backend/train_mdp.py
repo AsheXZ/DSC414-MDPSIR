@@ -16,15 +16,19 @@ class EnvConfig:
     population: int = 1000
     beta: float = 0.30
     gamma: float = 0.10
+    mu: float = 0.01
     initial_infected: int = 10
     initial_recovered: int = 0
+    initial_deceased: int = 0
     horizon: int = 300
     budget: float = 300.0
     reward_infection_weight: float = 1.0
+    reward_death_weight: float = 2.0
     reward_action_weight: float = 0.05
     s_bins: int = 20
     i_bins: int = 20
     r_bins: int = 20
+    d_bins: int = 20
 
 
 class SIRBudgetEnv(gym.Env):
@@ -54,41 +58,51 @@ class SIRBudgetEnv(gym.Env):
         self.action_count = len(self.action_effects)
 
         self.action_space = spaces.Discrete(4)
-        # Observation is continuous S, I, R, remaining_budget.
+        # Observation is continuous S, I, R, D, remaining_budget.
         self.observation_space = spaces.Box(
-            low=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
-            high=np.array([self.N, self.N, self.N, self.config.budget], dtype=np.float32),
+            low=np.array([0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            high=np.array([self.N, self.N, self.N, self.N, self.config.budget], dtype=np.float32),
             dtype=np.float32,
         )
 
         self.S = 0.0
         self.I = 0.0
         self.R = 0.0
+        self.D = 0.0
         self.remaining_budget = 0.0
         self.t = 0
 
     def _get_obs(self) -> np.ndarray:
-        return np.array([self.S, self.I, self.R, self.remaining_budget], dtype=np.float32)
+        return np.array([self.S, self.I, self.R, self.D, self.remaining_budget], dtype=np.float32)
 
-    def _discretize_state(self, obs: np.ndarray) -> Tuple[int, int, int, int]:
+    def _discretize_state(self, obs: np.ndarray) -> Tuple[int, int, int, int, int]:
         s_ratio = obs[0] / self.N
         i_ratio = obs[1] / self.N
         r_ratio = obs[2] / self.N
-        b_ratio = obs[3] / max(1e-9, self.config.budget)
+        d_ratio = obs[3] / self.N
+        b_ratio = obs[4] / max(1e-9, self.config.budget)
 
         s_idx = min(self.config.s_bins - 1, max(0, int(s_ratio * self.config.s_bins)))
         i_idx = min(self.config.i_bins - 1, max(0, int(i_ratio * self.config.i_bins)))
         r_idx = min(self.config.r_bins - 1, max(0, int(r_ratio * self.config.r_bins)))
+        d_idx = min(self.config.d_bins - 1, max(0, int(d_ratio * self.config.d_bins)))
         # Keep budget bins aligned to action count for compact Q-table dimensions.
         b_bins = 10
         b_idx = min(b_bins - 1, max(0, int(b_ratio * b_bins)))
-        return s_idx, i_idx, r_idx, b_idx
+        return s_idx, i_idx, r_idx, d_idx, b_idx
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None):
         super().reset(seed=seed)
-        self.S = float(self.config.population - self.config.initial_infected - self.config.initial_recovered)
+        self.S = float(
+            self.config.population
+            - self.config.initial_infected
+            - self.config.initial_recovered
+            - self.config.initial_deceased
+        )
+        self.S = max(0.0, self.S)
         self.I = float(self.config.initial_infected)
         self.R = float(self.config.initial_recovered)
+        self.D = float(self.config.initial_deceased)
         self.remaining_budget = float(self.config.budget)
         self.t = 0
 
@@ -121,32 +135,44 @@ class SIRBudgetEnv(gym.Env):
         S_after_vax = self.S - vaccinated
         R_after_vax = self.R + vaccinated
 
-        # Core SIR dynamics.
-        new_infections = beta_eff * (S_after_vax * self.I / self.N)
-        new_recoveries = self.config.gamma * self.I
+        # Core SIRD dynamics with bounded transitions.
+        new_infections = min(S_after_vax, beta_eff * (S_after_vax * self.I / self.N))
+
+        total_out_rate = max(0.0, self.config.gamma + self.config.mu)
+        total_out = min(self.I, total_out_rate * self.I)
+        if total_out_rate > 0:
+            new_recoveries = total_out * (self.config.gamma / total_out_rate)
+            new_deaths = total_out * (self.config.mu / total_out_rate)
+        else:
+            new_recoveries = 0.0
+            new_deaths = 0.0
 
         S_next = S_after_vax - new_infections
-        I_next = self.I + new_infections - new_recoveries
+        I_next = self.I + new_infections - new_recoveries - new_deaths
         R_next = R_after_vax + new_recoveries
+        D_next = self.D + new_deaths
 
         # Numerical guardrails and conservation normalization.
         S_next = max(0.0, S_next)
         I_next = max(0.0, I_next)
         R_next = max(0.0, R_next)
-        total = S_next + I_next + R_next
+        D_next = max(0.0, D_next)
+        total = S_next + I_next + R_next + D_next
         if total > 0:
             scale = self.N / total
             S_next *= scale
             I_next *= scale
             R_next *= scale
+            D_next *= scale
 
-        self.S, self.I, self.R = S_next, I_next, R_next
+        self.S, self.I, self.R, self.D = S_next, I_next, R_next, D_next
         self.remaining_budget = max(0.0, self.remaining_budget - incurred_cost)
         self.t += 1
 
         infection_penalty = self.config.reward_infection_weight * (self.I / self.N)
+        death_penalty = self.config.reward_death_weight * (new_deaths / self.N)
         action_penalty = self.config.reward_action_weight * (incurred_cost / max(1.0, self.config.budget))
-        reward = -(infection_penalty + action_penalty)
+        reward = -(infection_penalty + death_penalty + action_penalty)
 
         terminated = self.I < 1e-3
         truncated = self.t >= self.config.horizon
@@ -156,6 +182,8 @@ class SIRBudgetEnv(gym.Env):
             "effective_action": effective_action,
             "incurred_cost": incurred_cost,
             "budget_violation": budget_violation,
+            "deaths_this_step": new_deaths,
+            "cumulative_deaths": self.D,
             "state_disc": self._discretize_state(obs),
         }
         return obs, reward, terminated, truncated, info
@@ -186,17 +214,18 @@ class QLearningAgent:
                 self.env.config.s_bins,
                 self.env.config.i_bins,
                 self.env.config.r_bins,
+                self.env.config.d_bins,
                 self.b_bins,
                 self.env.action_count,
             ),
             dtype=np.float32,
         )
 
-    def _select_action(self, state_disc: Tuple[int, int, int, int], epsilon: float) -> int:
+    def _select_action(self, state_disc: Tuple[int, int, int, int, int], epsilon: float) -> int:
         if random.random() < epsilon:
             return self.env.action_space.sample()
-        s_idx, i_idx, r_idx, b_idx = state_disc
-        q_vals = self.q_table[s_idx, i_idx, r_idx, b_idx, :]
+        s_idx, i_idx, r_idx, d_idx, b_idx = state_disc
+        q_vals = self.q_table[s_idx, i_idx, r_idx, d_idx, b_idx, :]
         return int(np.argmax(q_vals))
 
     def train(self) -> Dict:
@@ -219,14 +248,14 @@ class QLearningAgent:
                 next_obs, reward, terminated, truncated, step_info = self.env.step(action)
                 next_state_disc = step_info["state_disc"]
 
-                s_idx, i_idx, r_idx, b_idx = state_disc
-                ns_idx, ni_idx, nr_idx, nb_idx = next_state_disc
+                s_idx, i_idx, r_idx, d_idx, b_idx = state_disc
+                ns_idx, ni_idx, nr_idx, nd_idx, nb_idx = next_state_disc
 
-                current_q = self.q_table[s_idx, i_idx, r_idx, b_idx, action]
-                max_next_q = np.max(self.q_table[ns_idx, ni_idx, nr_idx, nb_idx, :])
+                current_q = self.q_table[s_idx, i_idx, r_idx, d_idx, b_idx, action]
+                max_next_q = np.max(self.q_table[ns_idx, ni_idx, nr_idx, nd_idx, nb_idx, :])
                 td_target = reward + self.cfg.gamma * max_next_q
                 td_error = td_target - current_q
-                self.q_table[s_idx, i_idx, r_idx, b_idx, action] = current_q + self.cfg.alpha * td_error
+                self.q_table[s_idx, i_idx, r_idx, d_idx, b_idx, action] = current_q + self.cfg.alpha * td_error
 
                 episode_history.append(
                     {
@@ -235,12 +264,14 @@ class QLearningAgent:
                             "S": float(obs[0]),
                             "I": float(obs[1]),
                             "R": float(obs[2]),
-                            "budget_remaining": float(obs[3]),
+                            "D": float(obs[3]),
+                            "budget_remaining": float(obs[4]),
                         },
                         "state_discrete": {
                             "s_bin": int(s_idx),
                             "i_bin": int(i_idx),
                             "r_bin": int(r_idx),
+                            "d_bin": int(d_idx),
                             "budget_bin": int(b_idx),
                         },
                         "action_requested": int(action),
@@ -302,6 +333,7 @@ def export_training_artifacts(
             "s_bins": env_cfg.s_bins,
             "i_bins": env_cfg.i_bins,
             "r_bins": env_cfg.r_bins,
+            "d_bins": env_cfg.d_bins,
             "budget_bins": 10,
         },
     }
@@ -311,8 +343,10 @@ def export_training_artifacts(
             "population": env_cfg.population,
             "beta": env_cfg.beta,
             "gamma": env_cfg.gamma,
+            "mu": env_cfg.mu,
             "initial_infected": env_cfg.initial_infected,
             "initial_recovered": env_cfg.initial_recovered,
+            "initial_deceased": env_cfg.initial_deceased,
             "horizon": env_cfg.horizon,
             "budget": env_cfg.budget,
         },

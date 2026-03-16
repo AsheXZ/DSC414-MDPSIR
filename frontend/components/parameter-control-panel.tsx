@@ -88,13 +88,16 @@ export function ParameterControlPanel({
             const nextPopulation = clamp(Math.round(value), 100, 100000);
             const maxI = nextPopulation;
             const maxR = nextPopulation;
+            const maxD = nextPopulation;
             const nextInfected = clamp(params.initialInfected, 0, maxI);
             const nextRecovered = clamp(params.initialRecovered, 0, maxR);
+            const nextDeceased = clamp(params.initialDeceased, 0, maxD);
             onChange({
               ...params,
               population: nextPopulation,
               initialInfected: nextInfected,
               initialRecovered: nextRecovered,
+              initialDeceased: nextDeceased,
             });
           }}
         />
@@ -118,6 +121,17 @@ export function ParameterControlPanel({
           step={1}
           onValueChange={(value) =>
             update("initialRecovered", clamp(Math.round(value), 0, params.population))
+          }
+        />
+
+        <ControlRow
+          label="Initial Deceased"
+          value={params.initialDeceased}
+          min={0}
+          max={params.population}
+          step={1}
+          onValueChange={(value) =>
+            update("initialDeceased", clamp(Math.round(value), 0, params.population))
           }
         />
 
@@ -146,6 +160,15 @@ export function ParameterControlPanel({
           max={1}
           step={0.01}
           onValueChange={(value) => update("gamma", clamp(value, 0, 1))}
+        />
+
+        <ControlRow
+          label="Mortality Rate (mu)"
+          value={params.mu}
+          min={0}
+          max={1}
+          step={0.01}
+          onValueChange={(value) => update("mu", clamp(value, 0, 1))}
         />
       </div>
 
