@@ -17,6 +17,9 @@ class EnvConfig:
     beta: float = 0.30
     gamma: float = 0.10
     mu: float = 0.01
+    randomize_disease_params: bool = True
+    beta_range: Tuple[float, float] = (0.15, 0.50)
+    gamma_range: Tuple[float, float] = (0.05, 0.20)
     initial_infected: int = 10
     initial_recovered: int = 0
     initial_deceased: int = 0
@@ -25,10 +28,12 @@ class EnvConfig:
     reward_infection_weight: float = 1.0
     reward_death_weight: float = 2.0
     reward_action_weight: float = 0.05
-    s_bins: int = 20
-    i_bins: int = 20
-    r_bins: int = 20
-    d_bins: int = 20
+    s_bins: int = 8
+    i_bins: int = 8
+    r_bins: int = 8
+    d_bins: int = 8
+    beta_bins: int = 5
+    gamma_bins: int = 5
 
 
 class SIRBudgetEnv(gym.Env):
@@ -58,10 +63,32 @@ class SIRBudgetEnv(gym.Env):
         self.action_count = len(self.action_effects)
 
         self.action_space = spaces.Discrete(4)
-        # Observation is continuous S, I, R, D, remaining_budget.
+        # Observation is continuous S, I, R, D, remaining_budget, beta, gamma.
         self.observation_space = spaces.Box(
-            low=np.array([0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
-            high=np.array([self.N, self.N, self.N, self.N, self.config.budget], dtype=np.float32),
+            low=np.array(
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    min(self.config.beta_range),
+                    min(self.config.gamma_range),
+                ],
+                dtype=np.float32,
+            ),
+            high=np.array(
+                [
+                    self.N,
+                    self.N,
+                    self.N,
+                    self.N,
+                    self.config.budget,
+                    max(self.config.beta_range),
+                    max(self.config.gamma_range),
+                ],
+                dtype=np.float32,
+            ),
             dtype=np.float32,
         )
 
@@ -71,16 +98,43 @@ class SIRBudgetEnv(gym.Env):
         self.D = 0.0
         self.remaining_budget = 0.0
         self.t = 0
+        self.current_beta = float(self.config.beta)
+        self.current_gamma = float(self.config.gamma)
+
+    def _sample_disease_params(self) -> None:
+        if self.config.randomize_disease_params:
+            self.current_beta = random.uniform(*self.config.beta_range)
+            self.current_gamma = random.uniform(*self.config.gamma_range)
+        else:
+            self.current_beta = float(self.config.beta)
+            self.current_gamma = float(self.config.gamma)
 
     def _get_obs(self) -> np.ndarray:
-        return np.array([self.S, self.I, self.R, self.D, self.remaining_budget], dtype=np.float32)
+        return np.array(
+            [
+                self.S,
+                self.I,
+                self.R,
+                self.D,
+                self.remaining_budget,
+                self.current_beta,
+                self.current_gamma,
+            ],
+            dtype=np.float32,
+        )
 
-    def _discretize_state(self, obs: np.ndarray) -> Tuple[int, int, int, int, int]:
+    def _discretize_state(self, obs: np.ndarray) -> Tuple[int, int, int, int, int, int, int]:
         s_ratio = obs[0] / self.N
         i_ratio = obs[1] / self.N
         r_ratio = obs[2] / self.N
         d_ratio = obs[3] / self.N
         b_ratio = obs[4] / max(1e-9, self.config.budget)
+        beta_ratio = (obs[5] - self.config.beta_range[0]) / max(
+            1e-9, self.config.beta_range[1] - self.config.beta_range[0]
+        )
+        gamma_ratio = (obs[6] - self.config.gamma_range[0]) / max(
+            1e-9, self.config.gamma_range[1] - self.config.gamma_range[0]
+        )
 
         s_idx = min(self.config.s_bins - 1, max(0, int(s_ratio * self.config.s_bins)))
         i_idx = min(self.config.i_bins - 1, max(0, int(i_ratio * self.config.i_bins)))
@@ -89,7 +143,12 @@ class SIRBudgetEnv(gym.Env):
         # Keep budget bins aligned to action count for compact Q-table dimensions.
         b_bins = 10
         b_idx = min(b_bins - 1, max(0, int(b_ratio * b_bins)))
-        return s_idx, i_idx, r_idx, d_idx, b_idx
+        beta_idx = min(self.config.beta_bins - 1, max(0, int(beta_ratio * self.config.beta_bins)))
+        gamma_idx = min(
+            self.config.gamma_bins - 1,
+            max(0, int(gamma_ratio * self.config.gamma_bins)),
+        )
+        return s_idx, i_idx, r_idx, d_idx, b_idx, beta_idx, gamma_idx
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None):
         super().reset(seed=seed)
@@ -105,6 +164,7 @@ class SIRBudgetEnv(gym.Env):
         self.D = float(self.config.initial_deceased)
         self.remaining_budget = float(self.config.budget)
         self.t = 0
+        self._sample_disease_params()
 
         obs = self._get_obs()
         info = {"state_disc": self._discretize_state(obs)}
@@ -127,7 +187,7 @@ class SIRBudgetEnv(gym.Env):
             incurred_cost = requested_cost
             budget_violation = False
 
-        beta_eff = self.config.beta * float(action_spec["beta_multiplier"])
+        beta_eff = self.current_beta * float(action_spec["beta_multiplier"])
         vacc_rate = float(action_spec["vaccination_rate"])
 
         # Vaccination directly moves a share of susceptible to recovered.
@@ -138,10 +198,10 @@ class SIRBudgetEnv(gym.Env):
         # Core SIRD dynamics with bounded transitions.
         new_infections = min(S_after_vax, beta_eff * (S_after_vax * self.I / self.N))
 
-        total_out_rate = max(0.0, self.config.gamma + self.config.mu)
+        total_out_rate = max(0.0, self.current_gamma + self.config.mu)
         total_out = min(self.I, total_out_rate * self.I)
         if total_out_rate > 0:
-            new_recoveries = total_out * (self.config.gamma / total_out_rate)
+            new_recoveries = total_out * (self.current_gamma / total_out_rate)
             new_deaths = total_out * (self.config.mu / total_out_rate)
         else:
             new_recoveries = 0.0
@@ -184,6 +244,8 @@ class SIRBudgetEnv(gym.Env):
             "budget_violation": budget_violation,
             "deaths_this_step": new_deaths,
             "cumulative_deaths": self.D,
+            "episode_beta": self.current_beta,
+            "episode_gamma": self.current_gamma,
             "state_disc": self._discretize_state(obs),
         }
         return obs, reward, terminated, truncated, info
@@ -216,16 +278,18 @@ class QLearningAgent:
                 self.env.config.r_bins,
                 self.env.config.d_bins,
                 self.b_bins,
+                self.env.config.beta_bins,
+                self.env.config.gamma_bins,
                 self.env.action_count,
             ),
             dtype=np.float32,
         )
 
-    def _select_action(self, state_disc: Tuple[int, int, int, int, int], epsilon: float) -> int:
+    def _select_action(self, state_disc: Tuple[int, int, int, int, int, int, int], epsilon: float) -> int:
         if random.random() < epsilon:
             return self.env.action_space.sample()
-        s_idx, i_idx, r_idx, d_idx, b_idx = state_disc
-        q_vals = self.q_table[s_idx, i_idx, r_idx, d_idx, b_idx, :]
+        s_idx, i_idx, r_idx, d_idx, b_idx, beta_idx, gamma_idx = state_disc
+        q_vals = self.q_table[s_idx, i_idx, r_idx, d_idx, b_idx, beta_idx, gamma_idx, :]
         return int(np.argmax(q_vals))
 
     def train(self) -> Dict:
@@ -248,14 +312,43 @@ class QLearningAgent:
                 next_obs, reward, terminated, truncated, step_info = self.env.step(action)
                 next_state_disc = step_info["state_disc"]
 
-                s_idx, i_idx, r_idx, d_idx, b_idx = state_disc
-                ns_idx, ni_idx, nr_idx, nd_idx, nb_idx = next_state_disc
+                s_idx, i_idx, r_idx, d_idx, b_idx, beta_idx, gamma_idx = state_disc
+                ns_idx, ni_idx, nr_idx, nd_idx, nb_idx, nbeta_idx, ngamma_idx = next_state_disc
 
-                current_q = self.q_table[s_idx, i_idx, r_idx, d_idx, b_idx, action]
-                max_next_q = np.max(self.q_table[ns_idx, ni_idx, nr_idx, nd_idx, nb_idx, :])
+                current_q = self.q_table[
+                    s_idx,
+                    i_idx,
+                    r_idx,
+                    d_idx,
+                    b_idx,
+                    beta_idx,
+                    gamma_idx,
+                    action,
+                ]
+                max_next_q = np.max(
+                    self.q_table[
+                        ns_idx,
+                        ni_idx,
+                        nr_idx,
+                        nd_idx,
+                        nb_idx,
+                        nbeta_idx,
+                        ngamma_idx,
+                        :,
+                    ]
+                )
                 td_target = reward + self.cfg.gamma * max_next_q
                 td_error = td_target - current_q
-                self.q_table[s_idx, i_idx, r_idx, d_idx, b_idx, action] = current_q + self.cfg.alpha * td_error
+                self.q_table[
+                    s_idx,
+                    i_idx,
+                    r_idx,
+                    d_idx,
+                    b_idx,
+                    beta_idx,
+                    gamma_idx,
+                    action,
+                ] = current_q + self.cfg.alpha * td_error
 
                 episode_history.append(
                     {
@@ -266,6 +359,8 @@ class QLearningAgent:
                             "R": float(obs[2]),
                             "D": float(obs[3]),
                             "budget_remaining": float(obs[4]),
+                            "beta": float(obs[5]),
+                            "gamma": float(obs[6]),
                         },
                         "state_discrete": {
                             "s_bin": int(s_idx),
@@ -273,6 +368,8 @@ class QLearningAgent:
                             "r_bin": int(r_idx),
                             "d_bin": int(d_idx),
                             "budget_bin": int(b_idx),
+                            "beta_bin": int(beta_idx),
+                            "gamma_bin": int(gamma_idx),
                         },
                         "action_requested": int(action),
                         "action_effective": int(step_info["effective_action"]),
@@ -335,6 +432,8 @@ def export_training_artifacts(
             "r_bins": env_cfg.r_bins,
             "d_bins": env_cfg.d_bins,
             "budget_bins": 10,
+            "beta_bins": env_cfg.beta_bins,
+            "gamma_bins": env_cfg.gamma_bins,
         },
     }
 
@@ -344,6 +443,9 @@ def export_training_artifacts(
             "beta": env_cfg.beta,
             "gamma": env_cfg.gamma,
             "mu": env_cfg.mu,
+            "randomize_disease_params": env_cfg.randomize_disease_params,
+            "beta_range": list(env_cfg.beta_range),
+            "gamma_range": list(env_cfg.gamma_range),
             "initial_infected": env_cfg.initial_infected,
             "initial_recovered": env_cfg.initial_recovered,
             "initial_deceased": env_cfg.initial_deceased,

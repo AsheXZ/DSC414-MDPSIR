@@ -51,6 +51,8 @@ type QTablePayload = {
     r_bins?: number;
     d_bins?: number;
     budget_bins?: number;
+    beta_bins?: number;
+    gamma_bins?: number;
   };
 };
 
@@ -112,15 +114,27 @@ function discretize(
   R: number,
   D: number,
   budget: number,
+  beta: number,
+  gamma: number,
   N: number,
   budgetCap: number,
-  bins: { s: number; i: number; r: number; d?: number; b: number },
+  bins: {
+    s: number;
+    i: number;
+    r: number;
+    d?: number;
+    b: number;
+    beta?: number;
+    gamma?: number;
+  },
 ) {
   const sRatio = S / Math.max(1, N);
   const iRatio = I / Math.max(1, N);
   const rRatio = R / Math.max(1, N);
   const dRatio = D / Math.max(1, N);
   const bRatio = budget / Math.max(1e-9, budgetCap);
+  const betaRatio = clamp(beta, 0, 1);
+  const gammaRatio = clamp(gamma, 0, 1);
 
   return {
     s: clamp(Math.floor(sRatio * bins.s), 0, bins.s - 1),
@@ -128,6 +142,14 @@ function discretize(
     r: clamp(Math.floor(rRatio * bins.r), 0, bins.r - 1),
     d: bins.d ? clamp(Math.floor(dRatio * bins.d), 0, bins.d - 1) : undefined,
     b: clamp(Math.floor(bRatio * bins.b), 0, bins.b - 1),
+    beta:
+      typeof bins.beta === "number"
+        ? clamp(Math.floor(betaRatio * bins.beta), 0, bins.beta - 1)
+        : undefined,
+    gamma:
+      typeof bins.gamma === "number"
+        ? clamp(Math.floor(gammaRatio * bins.gamma), 0, bins.gamma - 1)
+        : undefined,
   };
 }
 
@@ -138,17 +160,26 @@ function safeQValues(qValues: unknown): number[] {
 
 function greedyActionFromQ(
   qTableValues: unknown,
-  idx: { s: number; i: number; r: number; d?: number; b: number },
+  idx: { s: number; i: number; r: number; d?: number; b: number; beta?: number; gamma?: number },
 ): number {
   const table = qTableValues as unknown[];
   const sSlice = (table?.[idx.s] as unknown[] | undefined) ?? [];
   const iSlice = (sSlice[idx.i] as unknown[] | undefined) ?? [];
   const rSlice = (iSlice[idx.r] as unknown[] | undefined) ?? [];
 
-  const leaf =
+  const afterD =
     typeof idx.d === "number"
-      ? (((rSlice[idx.d] as unknown[] | undefined) ?? [])[idx.b] as unknown)
-      : (rSlice[idx.b] as unknown);
+      ? ((rSlice[idx.d] as unknown[] | undefined) ?? [])
+      : rSlice;
+  const afterBudget = ((afterD as unknown[] | undefined) ?? [])[idx.b] as unknown;
+  const afterBeta =
+    typeof idx.beta === "number"
+      ? (((afterBudget as unknown[] | undefined) ?? [])[idx.beta] as unknown)
+      : afterBudget;
+  const leaf =
+    typeof idx.gamma === "number"
+      ? (((afterBeta as unknown[] | undefined) ?? [])[idx.gamma] as unknown)
+      : afterBeta;
 
   const qValues = safeQValues(leaf);
 
@@ -371,10 +402,23 @@ export function EpidemicVisualization({
       r: qTablePayload.state_bins?.r_bins ?? 20,
       d: qTablePayload.state_bins?.d_bins,
       b: qTablePayload.state_bins?.budget_bins ?? 10,
+      beta: qTablePayload.state_bins?.beta_bins,
+      gamma: qTablePayload.state_bins?.gamma_bins,
     };
 
     return buildTimeline(params, ({ S, I, R, D, budget, N }) => {
-      const idx = discretize(S, I, R, D, budget, N, params.budget, bins);
+      const idx = discretize(
+        S,
+        I,
+        R,
+        D,
+        budget,
+        params.beta,
+        params.gamma,
+        N,
+        params.budget,
+        bins,
+      );
       return greedyActionFromQ(qTablePayload.values, idx);
     });
   }, [params, qTablePayload]);
