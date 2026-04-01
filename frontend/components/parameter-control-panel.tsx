@@ -11,51 +11,74 @@ type ParameterControlPanelProps = {
 
 type ControlRowProps = {
   label: string;
+  hint?: string;
   value: number;
   min: number;
   max: number;
   step: number;
-  unit?: string;
   onValueChange: (value: number) => void;
 };
 
-function ControlRow({
-  label,
-  value,
-  min,
-  max,
-  step,
-  unit,
-  onValueChange,
-}: ControlRowProps) {
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function ControlRow({ label, hint, value, min, max, step, onValueChange }: ControlRowProps) {
+  const resolvedValue = Number.isFinite(value) ? value : min;
+
   return (
-    <label className="grid gap-2">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-xs font-medium tracking-[0.14em] uppercase text-app-muted">{label}</span>
-        <div className="flex items-center gap-2">
-          <input
-            type="number"
-            value={Number.isFinite(value) ? value : min}
-            min={min}
-            max={max}
-            step={step}
-            onChange={(event) => onValueChange(Number(event.target.value))}
-            className="w-24 rounded-lg border border-app-panel-border bg-app px-2 py-1 text-right text-sm text-app-fg outline-none ring-0 transition focus:border-emerald-600 dark:focus:border-cyan-300"
-          />
-          <span className="w-8 text-xs text-app-muted">{unit ?? ""}</span>
+    <label className="grid gap-1.5">
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <p className="text-xs font-medium tracking-[0.14em] uppercase text-app-muted">{label}</p>
+          {hint ? <p className="text-[11px] text-app-muted/80">{hint}</p> : null}
         </div>
+        <input
+          type="number"
+          value={resolvedValue}
+          min={min}
+          max={max}
+          step={step}
+          onChange={(event) => onValueChange(Number(event.target.value))}
+          className="w-24 rounded-md border border-app-panel-border bg-app px-2 py-1 text-right text-sm outline-none focus:border-[#3e8dcf]"
+        />
       </div>
       <input
         type="range"
-        value={Number.isFinite(value) ? value : min}
+        value={resolvedValue}
         min={min}
         max={max}
         step={step}
         onChange={(event) => onValueChange(Number(event.target.value))}
-        className="h-2 w-full cursor-pointer appearance-none rounded-full bg-emerald-900/20 accent-emerald-600 dark:accent-cyan-300"
+        className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-[#cad4e2] accent-[#3e8dcf] dark:bg-[#293649]"
       />
     </label>
   );
+}
+
+function epidemiologyChecks(params: MDPParameters): string[] {
+  const messages: string[] = [];
+  const livingInitial =
+    params.initialInfected + params.initialRecovered + params.initialDeceased;
+
+  if (livingInitial > params.population) {
+    messages.push("Initial compartments exceed population. Reduce infected/recovered/deceased totals.");
+  }
+
+  const totalOutRate = params.gamma + params.mu;
+  if (totalOutRate > 1) {
+    messages.push("gamma + mu is above 1.0 per step, which is aggressive for this discrete-time SIRD update.");
+  }
+
+  if (params.initialInfected === 0 && params.beta > 0) {
+    messages.push("Initial infected is 0, so no outbreak can start in this closed-population model.");
+  }
+
+  if (params.budget <= 0 && params.costs.noIntervention < 0.00001) {
+    messages.push("Budget is zero, so policy actions collapse to no-intervention only.");
+  }
+
+  return messages;
 }
 
 export function ParameterControlPanel({
@@ -64,20 +87,30 @@ export function ParameterControlPanel({
   hasPendingChanges,
   onApply,
 }: ParameterControlPanelProps) {
-  const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
-
   const update = <K extends keyof MDPParameters>(key: K, value: MDPParameters[K]) => {
     onChange({ ...params, [key]: value });
   };
 
+  const r0 = params.gamma + params.mu > 0 ? params.beta / (params.gamma + params.mu) : 0;
+  const suitability = epidemiologyChecks(params);
+
   return (
-    <section className="rounded-3xl border border-app-panel-border bg-app-panel p-6 shadow-[0_12px_45px_rgba(16,35,30,0.08)] backdrop-blur-md dark:shadow-[0_16px_50px_rgba(2,8,8,0.35)]">
-      <h2 className="text-lg font-semibold">Parameter Controls</h2>
-      <p className="mt-1 text-sm text-app-muted">
-        Adjust epidemic and policy assumptions. These values are kept in shared state and ready for visualization.
+    <section className="rounded-2xl border border-app-panel-border bg-app-panel p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.22em] text-app-muted">Scenario Builder</p>
+          <h2 className="text-lg font-semibold">Design An Epidemic</h2>
+        </div>
+        <div className="rounded-full border border-app-panel-border bg-app px-4 py-2 text-xs">
+          R0 estimate: <span className="font-semibold">{r0.toFixed(2)}</span>
+        </div>
+      </div>
+
+      <p className="mt-2 text-sm text-app-muted">
+        Controls are constrained to the SIRD assumptions used by the backend model.
       </p>
 
-      <div className="mt-6 grid gap-5">
+      <div className="mt-5 grid gap-4">
         <ControlRow
           label="Population"
           value={params.population}
@@ -85,21 +118,25 @@ export function ParameterControlPanel({
           max={100000}
           step={100}
           onValueChange={(value) => {
-            const nextPopulation = clamp(Math.round(value), 100, 100000);
-            const maxI = nextPopulation;
-            const maxR = nextPopulation;
-            const maxD = nextPopulation;
-            const nextInfected = clamp(params.initialInfected, 0, maxI);
-            const nextRecovered = clamp(params.initialRecovered, 0, maxR);
-            const nextDeceased = clamp(params.initialDeceased, 0, maxD);
+            const population = clamp(Math.round(value), 100, 100000);
             onChange({
               ...params,
-              population: nextPopulation,
-              initialInfected: nextInfected,
-              initialRecovered: nextRecovered,
-              initialDeceased: nextDeceased,
+              population,
+              initialInfected: clamp(params.initialInfected, 0, population),
+              initialRecovered: clamp(params.initialRecovered, 0, population),
+              initialDeceased: clamp(params.initialDeceased, 0, population),
             });
           }}
+        />
+
+        <ControlRow
+          label="Horizon"
+          hint="Simulation steps"
+          value={params.horizon}
+          min={30}
+          max={360}
+          step={5}
+          onValueChange={(value) => update("horizon", clamp(Math.round(value), 30, 360))}
         />
 
         <ControlRow
@@ -170,28 +207,9 @@ export function ParameterControlPanel({
           step={0.01}
           onValueChange={(value) => update("mu", clamp(value, 0, 1))}
         />
-      </div>
-
-      <hr className="my-6 border-app-panel-border" />
-
-      <h3 className="text-sm font-semibold tracking-[0.14em] uppercase text-app-muted">Intervention Costs</h3>
-      <div className="mt-4 grid gap-5">
-        <ControlRow
-          label="No Intervention"
-          value={params.costs.noIntervention}
-          min={0}
-          max={100}
-          step={1}
-          onValueChange={(value) =>
-            onChange({
-              ...params,
-              costs: { ...params.costs, noIntervention: clamp(value, 0, 100) },
-            })
-          }
-        />
 
         <ControlRow
-          label="Social Distancing"
+          label="Cost: Social Distancing"
           value={params.costs.socialDistancing}
           min={0}
           max={100}
@@ -205,7 +223,7 @@ export function ParameterControlPanel({
         />
 
         <ControlRow
-          label="Lockdown"
+          label="Cost: Lockdown"
           value={params.costs.lockdown}
           min={0}
           max={100}
@@ -219,7 +237,7 @@ export function ParameterControlPanel({
         />
 
         <ControlRow
-          label="Vaccination Campaign"
+          label="Cost: Vaccination"
           value={params.costs.vaccinationCampaign}
           min={0}
           max={100}
@@ -233,17 +251,28 @@ export function ParameterControlPanel({
         />
       </div>
 
-      <div className="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-app-panel-border bg-app p-3">
-        <p className="text-xs text-app-muted">
-          Changes are staged until applied.
-        </p>
+      <div className="mt-5 rounded-2xl border border-app-panel-border bg-app p-3 text-xs">
+        <p className="font-medium uppercase tracking-[0.14em] text-app-muted">Model Suitability</p>
+        {suitability.length === 0 ? (
+          <p className="mt-2 text-[#4f9f7d]">Scenario is consistent with current SIRD assumptions.</p>
+        ) : (
+          <ul className="mt-2 grid gap-1.5 text-[#d86d6d]">
+            {suitability.map((issue) => (
+              <li key={issue}>- {issue}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="mt-5 flex items-center justify-between gap-3 rounded-2xl border border-app-panel-border bg-app p-3">
+        <p className="text-xs text-app-muted">Changes are staged until applied.</p>
         <button
           type="button"
           onClick={onApply}
           disabled={!hasPendingChanges}
-          className="rounded-full border border-emerald-500/50 bg-emerald-500/15 px-5 py-2 text-xs font-semibold tracking-[0.12em] uppercase text-emerald-700 transition enabled:hover:scale-[1.02] enabled:hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-45 dark:border-cyan-300/50 dark:bg-cyan-300/10 dark:text-cyan-200"
+          className="rounded-full border border-app-panel-border bg-[#3e8dcf] px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-white disabled:cursor-not-allowed disabled:opacity-50"
         >
-          Apply And Restart
+          Apply Scenario
         </button>
       </div>
     </section>

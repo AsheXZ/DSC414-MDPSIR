@@ -28,12 +28,15 @@ class EnvConfig:
     reward_infection_weight: float = 1.0
     reward_death_weight: float = 2.0
     reward_action_weight: float = 0.05
-    s_bins: int = 8
-    i_bins: int = 8
-    r_bins: int = 8
-    d_bins: int = 8
+    # Moderate defaults improve state coverage while remaining configurable.
+    s_bins: int = 6
+    i_bins: int = 6
+    r_bins: int = 6
+    d_bins: int = 6
+    budget_bins: int = 8
     beta_bins: int = 5
     gamma_bins: int = 5
+    reward_eradication_bonus: float = 0.25
 
 
 class SIRBudgetEnv(gym.Env):
@@ -103,8 +106,9 @@ class SIRBudgetEnv(gym.Env):
 
     def _sample_disease_params(self) -> None:
         if self.config.randomize_disease_params:
-            self.current_beta = random.uniform(*self.config.beta_range)
-            self.current_gamma = random.uniform(*self.config.gamma_range)
+            # Use Gymnasium-managed RNG so per-episode seeding is reproducible.
+            self.current_beta = float(self.np_random.uniform(*self.config.beta_range))
+            self.current_gamma = float(self.np_random.uniform(*self.config.gamma_range))
         else:
             self.current_beta = float(self.config.beta)
             self.current_gamma = float(self.config.gamma)
@@ -140,8 +144,7 @@ class SIRBudgetEnv(gym.Env):
         i_idx = min(self.config.i_bins - 1, max(0, int(i_ratio * self.config.i_bins)))
         r_idx = min(self.config.r_bins - 1, max(0, int(r_ratio * self.config.r_bins)))
         d_idx = min(self.config.d_bins - 1, max(0, int(d_ratio * self.config.d_bins)))
-        # Keep budget bins aligned to action count for compact Q-table dimensions.
-        b_bins = 10
+        b_bins = self.config.budget_bins
         b_idx = min(b_bins - 1, max(0, int(b_ratio * b_bins)))
         beta_idx = min(self.config.beta_bins - 1, max(0, int(beta_ratio * self.config.beta_bins)))
         gamma_idx = min(
@@ -212,18 +215,22 @@ class SIRBudgetEnv(gym.Env):
         R_next = R_after_vax + new_recoveries
         D_next = self.D + new_deaths
 
-        # Numerical guardrails and conservation normalization.
+        # Numerical guardrails and conservation without reviving deceased population.
         S_next = max(0.0, S_next)
         I_next = max(0.0, I_next)
         R_next = max(0.0, R_next)
-        D_next = max(0.0, D_next)
-        total = S_next + I_next + R_next + D_next
-        if total > 0:
-            scale = self.N / total
+        D_next = min(self.N, max(0.0, D_next))
+        living_target = max(0.0, self.N - D_next)
+        living_total = S_next + I_next + R_next
+        if living_total > 0:
+            scale = living_target / living_total
             S_next *= scale
             I_next *= scale
             R_next *= scale
-            D_next *= scale
+        else:
+            S_next = 0.0
+            I_next = 0.0
+            R_next = 0.0
 
         self.S, self.I, self.R, self.D = S_next, I_next, R_next, D_next
         self.remaining_budget = max(0.0, self.remaining_budget - incurred_cost)
@@ -235,6 +242,8 @@ class SIRBudgetEnv(gym.Env):
         reward = -(infection_penalty + death_penalty + action_penalty)
 
         terminated = self.I < 1e-3
+        if terminated:
+            reward += self.config.reward_eradication_bonus
         truncated = self.t >= self.config.horizon
 
         obs = self._get_obs()
@@ -258,7 +267,8 @@ class QLearningConfig:
     gamma: float = 0.97
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
-    epsilon_decay: float = 0.995
+    # ~0.05 by the end of a 100k episode run (instead of by episode ~596).
+    epsilon_decay: float = 0.99997
     seed: int = 42
 
 
@@ -270,7 +280,7 @@ class QLearningAgent:
         random.seed(self.cfg.seed)
         np.random.seed(self.cfg.seed)
 
-        self.b_bins = 10
+        self.b_bins = self.env.config.budget_bins
         self.q_table = np.zeros(
             (
                 self.env.config.s_bins,
@@ -323,7 +333,7 @@ class QLearningAgent:
                     b_idx,
                     beta_idx,
                     gamma_idx,
-                    action,
+                    step_info["effective_action"],
                 ]
                 max_next_q = np.max(
                     self.q_table[
@@ -347,7 +357,7 @@ class QLearningAgent:
                     b_idx,
                     beta_idx,
                     gamma_idx,
-                    action,
+                    step_info["effective_action"],
                 ] = current_q + self.cfg.alpha * td_error
 
                 episode_history.append(
@@ -431,7 +441,7 @@ def export_training_artifacts(
             "i_bins": env_cfg.i_bins,
             "r_bins": env_cfg.r_bins,
             "d_bins": env_cfg.d_bins,
-            "budget_bins": 10,
+            "budget_bins": env_cfg.budget_bins,
             "beta_bins": env_cfg.beta_bins,
             "gamma_bins": env_cfg.gamma_bins,
         },
@@ -451,6 +461,8 @@ def export_training_artifacts(
             "initial_deceased": env_cfg.initial_deceased,
             "horizon": env_cfg.horizon,
             "budget": env_cfg.budget,
+            "budget_bins": env_cfg.budget_bins,
+            "reward_eradication_bonus": env_cfg.reward_eradication_bonus,
         },
         "agent": {
             "episodes": agent_cfg.episodes,

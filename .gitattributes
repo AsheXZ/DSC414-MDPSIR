@@ -1,1 +1,2 @@
 backend/artifacts/q_table.json filter=lfs diff=lfs merge=lfs -text
+backend/artifacts/training_run.json filter=lfs diff=lfs merge=lfs -text
