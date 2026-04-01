@@ -325,6 +325,8 @@ class QLearningAgent:
                 s_idx, i_idx, r_idx, d_idx, b_idx, beta_idx, gamma_idx = state_disc
                 ns_idx, ni_idx, nr_idx, nd_idx, nb_idx, nbeta_idx, ngamma_idx = next_state_disc
 
+                # Learn a value for the requested action, even if the env had to
+                # substitute a different effective action due to budget limits.
                 current_q = self.q_table[
                     s_idx,
                     i_idx,
@@ -333,7 +335,7 @@ class QLearningAgent:
                     b_idx,
                     beta_idx,
                     gamma_idx,
-                    step_info["effective_action"],
+                    action,
                 ]
                 max_next_q = np.max(
                     self.q_table[
@@ -357,7 +359,7 @@ class QLearningAgent:
                     b_idx,
                     beta_idx,
                     gamma_idx,
-                    step_info["effective_action"],
+                    action,
                 ] = current_q + self.cfg.alpha * td_error
 
                 episode_history.append(
